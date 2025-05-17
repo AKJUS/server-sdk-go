@@ -9,12 +9,13 @@ import (
 
 	"github.com/gammazero/deque"
 	"github.com/google/uuid"
-	media "github.com/livekit/media-sdk"
-	opus "github.com/livekit/media-sdk/opus"
-	rtp "github.com/livekit/media-sdk/rtp"
-	protoLogger "github.com/livekit/protocol/logger"
 	"github.com/pion/webrtc/v4"
 	"go.uber.org/atomic"
+
+	"github.com/livekit/media-sdk"
+	"github.com/livekit/media-sdk/opus"
+	"github.com/livekit/media-sdk/rtp"
+	protoLogger "github.com/livekit/protocol/logger"
 )
 
 const (
@@ -52,8 +53,12 @@ type PCMLocalTrack struct {
 	// TODO(anunaym14): switch out deque for a ring buffer
 	chunkBuffer *deque.Deque[int16]
 
-	mu     sync.Mutex
-	cond   *sync.Cond
+	mu   sync.Mutex
+	cond *sync.Cond
+
+	emptyBufMu   sync.Mutex
+	emptyBufCond *sync.Cond
+
 	closed atomic.Bool
 }
 
@@ -114,7 +119,7 @@ func NewPCMLocalTrack(sourceSampleRate int, sourceChannels int, logger protoLogg
 	}
 
 	t.cond = sync.NewCond(&t.mu)
-
+	t.emptyBufCond = sync.NewCond(&t.emptyBufMu)
 	go t.processSamples()
 	return t, nil
 }
@@ -128,7 +133,16 @@ func (t *PCMLocalTrack) pushChunksToBuffer(sample media.PCM16Sample) {
 func (t *PCMLocalTrack) waitUntilBufferHasChunks(count int) bool {
 	var didWait bool
 
+	if t.closed.Load() && t.chunkBuffer.Len() > 0 {
+		// write whatever is left, with silence as filler
+		return false
+	}
+
 	for t.chunkBuffer.Len() < count && !t.closed.Load() {
+		t.emptyBufMu.Lock()
+		t.emptyBufCond.Broadcast()
+		t.emptyBufMu.Unlock()
+
 		t.cond.Wait()
 		didWait = true
 	}
@@ -144,14 +158,15 @@ func (t *PCMLocalTrack) getChunksFromBuffer() (media.PCM16Sample, bool) {
 		didWait = t.waitUntilBufferHasChunks(t.chunksPerSample)
 	}
 
-	if t.closed.Load() {
+	if t.closed.Load() && t.chunkBuffer.Len() == 0 {
 		return nil, false
 	}
 
 	for i := 0; i < t.chunksPerSample; i++ {
 		if t.chunkBuffer.Len() == 0 {
 			// this will zero-init at index i, which will be a silent chunk.
-			// if writeSilenceOnNoData is false, this condition will never be true.
+			// if writeSilenceOnNoData is false, this condition will only be true
+			// when the track is closed and the buffer does not have enough chunks.
 			continue
 		} else {
 			chunks[i] = t.chunkBuffer.PopFront()
@@ -178,7 +193,7 @@ func (t *PCMLocalTrack) processSamples() {
 	defer ticker.Stop()
 
 	for {
-		if t.closed.Load() {
+		if t.closed.Load() && t.chunkBuffer.Len() == 0 {
 			break
 		}
 
@@ -195,17 +210,40 @@ func (t *PCMLocalTrack) processSamples() {
 		t.mu.Unlock()
 		<-ticker.C
 	}
+
+	// closing the writers here because we continue to write on close
+	// until the buffer is empty
+	t.resampledPCMWriter.Close()
+	t.pcmWriter.Close()
+	t.opusWriter.Close()
+}
+
+func (t *PCMLocalTrack) WaitForPlayout() {
+	t.emptyBufMu.Lock()
+	defer t.emptyBufMu.Unlock()
+
+	if t.writeSilenceOnNoData {
+		for t.chunkBuffer.Len() > 0 {
+			t.emptyBufCond.Wait()
+		}
+	} else {
+		for t.chunkBuffer.Len() > t.chunksPerSample {
+			t.emptyBufCond.Wait()
+		}
+	}
+}
+
+func (t *PCMLocalTrack) ClearQueue() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.chunkBuffer.Clear()
 }
 
 func (t *PCMLocalTrack) Close() {
 	if t.closed.CompareAndSwap(false, true) {
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.chunkBuffer.Clear()
 		t.cond.Broadcast()
-		t.resampledPCMWriter.Close()
-		t.pcmWriter.Close()
-		t.opusWriter.Close()
+		t.mu.Unlock()
 	}
 }
 
@@ -336,7 +374,7 @@ func (t *PCMRemoteTrack) process(handleJitter bool) {
 	// Handler takes RTP packets and writes the payload to opusWriter
 	var h rtp.Handler = rtp.NewMediaStreamIn[opus.Sample](t.opusWriter)
 	if handleJitter {
-		h = rtp.HandleJitter(int(t.trackRemote.Codec().ClockRate), h)
+		h = rtp.HandleJitter(h)
 	}
 
 	// HandleLoop takes RTP packets from the track and writes them to the handler
