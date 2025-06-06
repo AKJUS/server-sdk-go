@@ -98,6 +98,8 @@ type SignalClientConnectParams struct {
 
 	RetransmitBufferSize uint16
 
+	Attributes map[string]string // See WithExtraAttributes
+
 	Pacer pacer.Factory
 
 	Interceptors []interceptor.Factory
@@ -144,6 +146,20 @@ func WithICETransportPolicy(iceTransportPolicy webrtc.ICETransportPolicy) Connec
 func WithDisableRegionDiscovery() ConnectOption {
 	return func(p *SignalClientConnectParams) {
 		p.DisableRegionDiscovery = true
+	}
+}
+
+func WithExtraAttributes(attrs map[string]string) ConnectOption {
+	return func(p *SignalClientConnectParams) {
+		if len(attrs) != 0 && p.Attributes == nil {
+			p.Attributes = make(map[string]string, len(attrs))
+		}
+		for k, v := range attrs {
+			if v == "" {
+				continue
+			}
+			p.Attributes[k] = v
+		}
 	}
 }
 
@@ -209,6 +225,7 @@ func NewRoom(callback *RoomCallback) *Room {
 	engine.OnDataPacket = r.handleDataReceived
 	engine.OnConnectionQuality = r.handleConnectionQualityUpdate
 	engine.OnRoomUpdate = r.handleRoomUpdate
+	engine.OnRoomMoved = r.handleRoomMoved
 	engine.OnRestarting = r.handleRestarting
 	engine.OnRestarted = r.handleRestarted
 	engine.OnResuming = r.handleResuming
@@ -220,6 +237,7 @@ func NewRoom(callback *RoomCallback) *Room {
 	engine.OnStreamHeader = r.handleStreamHeader
 	engine.OnStreamChunk = r.handleStreamChunk
 	engine.OnStreamTrailer = r.handleStreamTrailer
+	engine.OnLocalTrackSubscribed = r.handleLocalTrackSubscribed
 
 	// callbacks engine can use to get data
 	engine.CbGetLocalParticipantSID = r.getLocalParticipantSID
@@ -760,6 +778,22 @@ func (r *Room) handleRoomUpdate(room *livekit.Room) {
 	}
 }
 
+func (r *Room) handleRoomMoved(moved *livekit.RoomMovedResponse) {
+	r.log.Infow("room moved", "newRoom", moved.Room.Name)
+	r.handleRoomUpdate(moved.Room)
+
+	for _, rp := range r.GetRemoteParticipants() {
+		r.handleParticipantDisconnect(rp)
+	}
+
+	go r.callback.OnRoomMoved(moved.Room.Name, moved.Token)
+
+	infos := make([]*livekit.ParticipantInfo, 0, len(moved.OtherParticipants)+1)
+	infos = append(infos, moved.Participant)
+	infos = append(infos, moved.OtherParticipants...)
+	r.handleParticipantUpdate(infos)
+}
+
 func (r *Room) handleTrackRemoteMuted(msg *livekit.MuteTrackRequest) {
 	for _, pub := range r.LocalParticipant.TrackPublications() {
 		if pub.SID() == msg.Sid {
@@ -798,6 +832,15 @@ func (r *Room) handleTranscriptionReceived(transcription *livekit.Transcription)
 	transcriptionSegments := ExtractTranscriptionSegments(transcription)
 
 	r.callback.OnTranscriptionReceived(transcriptionSegments, p, publication)
+}
+
+func (r *Room) handleLocalTrackSubscribed(trackSubscribed *livekit.TrackSubscribed) {
+	trackPublication := r.LocalParticipant.getLocalPublication(trackSubscribed.TrackSid)
+	if trackPublication == nil {
+		r.log.Debugw("recieved track subscribed for unknown track", "trackID", trackSubscribed.TrackSid)
+		return
+	}
+	r.callback.OnLocalTrackSubscribed(trackPublication, r.LocalParticipant)
 }
 
 func (r *Room) sendSyncState() {
