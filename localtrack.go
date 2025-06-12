@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	protoLogger "github.com/livekit/protocol/logger"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -34,6 +33,7 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/livekit/protocol/livekit"
+	protoLogger "github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/utils/guid"
 )
 
@@ -359,7 +359,7 @@ func (s *LocalTrack) WriteSample(sample media.Sample, opts *SampleWriteOptions) 
 	//   4. PrevDroppedPackets -> number of dropped packets before this sample
 	//
 	// The goal here is to calculate RTP time stamp of provided sample.
-	// Priority of what is used (eevn if multiple are provided)
+	// Priority of what is used (even if multiple are provided)
 	//   1. PacketTimestamp
 	//   2. Timestamp
 	//   3. Duration
@@ -602,6 +602,7 @@ func (s *LocalTrack) writeWorker(provider SampleProvider, onComplete func()) {
 				}
 			}
 
+			sample.Timestamp = nextSampleTime
 			if err := s.WriteSample(sample, opts); err != nil {
 				s.log.Errorw("could not write sample", err)
 				return

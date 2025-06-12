@@ -16,6 +16,8 @@ package lksdk
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +38,7 @@ import (
 	protoLogger "github.com/livekit/protocol/logger"
 )
 
-const PROTOCOL = 12
+const PROTOCOL = 16
 
 type SignalClient struct {
 	log             protoLogger.Logger
@@ -46,19 +48,22 @@ type SignalClient struct {
 	pendingResponse *livekit.SignalResponse
 	readerClosedCh  chan struct{}
 
-	OnClose                 func()
-	OnAnswer                func(sd webrtc.SessionDescription)
-	OnOffer                 func(sd webrtc.SessionDescription)
-	OnTrickle               func(init webrtc.ICECandidateInit, target livekit.SignalTarget)
-	OnParticipantUpdate     func([]*livekit.ParticipantInfo)
-	OnLocalTrackPublished   func(response *livekit.TrackPublishedResponse)
-	OnSpeakersChanged       func([]*livekit.SpeakerInfo)
-	OnConnectionQuality     func([]*livekit.ConnectionQualityInfo)
-	OnRoomUpdate            func(room *livekit.Room)
-	OnTrackRemoteMuted      func(request *livekit.MuteTrackRequest)
-	OnLocalTrackUnpublished func(response *livekit.TrackUnpublishedResponse)
-	OnTokenRefresh          func(refreshToken string)
-	OnLeave                 func(*livekit.LeaveRequest)
+	OnClose                   func()
+	OnAnswer                  func(sd webrtc.SessionDescription)
+	OnOffer                   func(sd webrtc.SessionDescription)
+	OnTrickle                 func(init webrtc.ICECandidateInit, target livekit.SignalTarget)
+	OnParticipantUpdate       func([]*livekit.ParticipantInfo)
+	OnLocalTrackPublished     func(response *livekit.TrackPublishedResponse)
+	OnSpeakersChanged         func([]*livekit.SpeakerInfo)
+	OnConnectionQuality       func([]*livekit.ConnectionQualityInfo)
+	OnRoomUpdate              func(room *livekit.Room)
+	OnRoomMoved               func(moved *livekit.RoomMovedResponse)
+	OnTrackRemoteMuted        func(request *livekit.MuteTrackRequest)
+	OnLocalTrackUnpublished   func(response *livekit.TrackUnpublishedResponse)
+	OnTokenRefresh            func(refreshToken string)
+	OnLeave                   func(*livekit.LeaveRequest)
+	OnLocalTrackSubscribed    func(trackSubscribed *livekit.TrackSubscribed)
+	OnSubscribedQualityUpdate func(subscribedQualityUpdate *livekit.SubscribedQualityUpdate)
 }
 
 func NewSignalClient() *SignalClient {
@@ -150,6 +155,14 @@ func (c *SignalClient) connectContext(ctx context.Context, urlPrefix string, tok
 		if participantSID != "" {
 			urlSuffix += fmt.Sprintf("&sid=%s", participantSID)
 		}
+	}
+	if len(params.Attributes) != 0 {
+		data, err := json.Marshal(params.Attributes)
+		if err != nil {
+			return nil, ErrInvalidParameter
+		}
+		str := base64.URLEncoding.EncodeToString(data)
+		urlSuffix += "&attributes=" + str
 	}
 	urlSuffix += getStatsParamString()
 
@@ -385,6 +398,15 @@ func (c *SignalClient) handleResponse(res *livekit.SignalResponse) {
 		if c.OnRoomUpdate != nil {
 			c.OnRoomUpdate(msg.RoomUpdate.Room)
 		}
+	case *livekit.SignalResponse_RoomMoved:
+		if c.OnTokenRefresh != nil {
+			c.OnTokenRefresh(msg.RoomMoved.Token)
+		}
+
+		if c.OnRoomMoved != nil {
+			c.OnRoomMoved(msg.RoomMoved)
+		}
+
 	case *livekit.SignalResponse_Leave:
 		if c.OnLeave != nil {
 			c.OnLeave(msg.Leave)
@@ -396,6 +418,14 @@ func (c *SignalClient) handleResponse(res *livekit.SignalResponse) {
 	case *livekit.SignalResponse_TrackUnpublished:
 		if c.OnLocalTrackUnpublished != nil {
 			c.OnLocalTrackUnpublished(msg.TrackUnpublished)
+		}
+	case *livekit.SignalResponse_TrackSubscribed:
+		if c.OnLocalTrackSubscribed != nil {
+			c.OnLocalTrackSubscribed(msg.TrackSubscribed)
+		}
+	case *livekit.SignalResponse_SubscribedQualityUpdate:
+		if c.OnSubscribedQualityUpdate != nil {
+			c.OnSubscribedQualityUpdate(msg.SubscribedQualityUpdate)
 		}
 	}
 }

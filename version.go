@@ -14,4 +14,4 @@
 
 package lksdk
 
-const Version = "2.6.0"
+const Version = "2.9.1"
